@@ -29,7 +29,7 @@ NOTBUS_DIR       = Path(r'C:\Users\Erik\Desktop\Uni\HLCV\new_data\highway\filter
 OUTPUT_DIR       = Path(r'C:\Users\Erik\Desktop\Uni\HLCV\new_data\highway_car')
 SAMPLE_PER_CLASS = 1000
 TYPES = [
-    'SUV','Sedan','Wagon','Coupe','Convertible',
+    'SUV','Sedan','Wagon','Coupe',
     'Hatchback','Van','Minivan','Pickup'
 ]
 # ======================
@@ -43,35 +43,75 @@ def main():
         sys.exit(1)
     df = pd.read_csv(HIGHWAY_CSV)
     # Prüfen notwendiger Spalten
-    for col in ('crop_name','path'):
+    for col in ('crop_name','path','xmin','ymin','xmax','ymax'):
         if col not in df.columns:
             print(f"Fehler: Spalte '{col}' fehlt in CSV", file=sys.stderr)
             sys.exit(1)
 
-    # 2) Prepare list of all image paths (unique)
-    all_records = df[['crop_name','path']].drop_duplicates().reset_index(drop=True)
-    available = all_records.to_dict('records')
-    random.shuffle(available)
+    # 2) Fehlende not_bus_truck-Einträge hinzufügen
+    existing = set(df['crop_name'])
+    new_records = []
+    for img in NOTBUS_DIR.glob('*'):
+        if img.suffix.lower() not in ('.jpg','.jpeg','.png'):
+            continue
+        if img.name not in existing:
+            new_records.append({
+                'day': None,
+                'orig_image': None,
+                'crop_name': img.name,
+                'xmin': None, 'ymin': None, 'xmax': None, 'ymax': None,
+                'width': None, 'height': None,
+                'path': str(img.resolve()),
+                'coarse_type': 'not_bus_truck'
+            })
+    if new_records:
+        df = pd.concat([df, pd.DataFrame(new_records)], ignore_index=True)
+        df.to_csv(HIGHWAY_CSV, index=False)
+        print(f"CSV überschrieben: {len(new_records)} neue Einträge hinzugefügt.")
+    else:
+        print("Keine neuen 'not_bus_truck'-Einträge gefunden.")
 
-    # 3) For each type, sample unique images
+    # 3) Filter nach Bounding-Box-Seitenverhältnis (≤5:1)
+    # Berechne Box-Breite und -Höhe
+    df['box_w'] = df['xmax'] - df['xmin']
+    df['box_h'] = df['ymax'] - df['ymin']
+    before = len(df)
+    df = df[df['box_h'] > 0]  # vermeide Division durch Null
+    df = df[df['box_w'] / df['box_h'] <= 5]
+    after = len(df)
+    print(f"Gefiltert nach Seitenverhältnis ≤5:1 – {before-after} Bilder entfernt, {after} verbleibend.")
+
+    # 4) Sampling und Kopieren
+    # Einmalige Liste aller Datensätze mischen
+    records = df[['crop_name','path','coarse_type']].drop_duplicates().to_dict('records')
+    random.shuffle(records)
+
+    # Zielordner neu anlegen
     if OUTPUT_DIR.exists():
         shutil.rmtree(OUTPUT_DIR)
-    for vtype in TYPES:
-        dest = OUTPUT_DIR / vtype
-        dest.mkdir(parents=True, exist_ok=True)
-        samples = []
-        for _ in range(min(SAMPLE_PER_CLASS, len(available))):
-            samples.append(available.pop(0))
-        for rec in samples:
-            src = Path(rec['path'])
-            dst = dest / rec['crop_name']
-            if not src.exists():
-                print(f"Warnung: Datei existiert nicht: {src}", file=sys.stderr)
-                continue
-            shutil.copy(src, dst)
-        print(f"{vtype}: {len(samples)} Bilder kopiert nach '{dest}'.")
+    for vt in TYPES:
+        (OUTPUT_DIR/vt).mkdir(parents=True, exist_ok=True)
 
-    print("Fertig: Manuelle Car-Samples erstellt.")
+    # Pro Typ unique Samples entnehmen
+    used = set()
+    for vt in TYPES:
+        count = 0
+        for rec in records:
+            if count >= SAMPLE_PER_CLASS:
+                break
+            if rec['crop_name'] in used:
+                continue
+            # nur Einträge matching vt (für negative 'not_bus_truck' nutzen coarse_type)
+            src = Path(rec['path'])
+            if not src.exists():
+                continue
+            dst = OUTPUT_DIR/vt/rec['crop_name']
+            shutil.copy(src, dst)
+            used.add(rec['crop_name'])
+            count += 1
+        print(f"{vt}: {count} Bilder kopiert nach '{OUTPUT_DIR/vt}'")
+
+    print("\nFertig: Manuelle Car-Samples erstellt.")
 
 if __name__ == '__main__':
     main()
